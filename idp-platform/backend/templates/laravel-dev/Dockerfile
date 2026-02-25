@@ -27,28 +27,14 @@ RUN chown -R coder:coder /home/coder/project-laravel && \
     chmod -R 755 /home/coder/project-laravel/bootstrap/cache
 
 # Créer un fichier README personnalisé
-RUN echo '# Laravel Project\n\
-    \n\
-    ## Getting Started\n\
-    \n\
-    This is a fresh Laravel installation ready to use!\n\
-    \n\
-    ### Run the development server:\n\
-    ```bash\n\
-    php artisan serve --host=0.0.0.0 --port=8000\n\
-    ```\n\
-    \n\
-    ### Run migrations:\n\
-    ```bash\n\
-    php artisan migrate\n\
-    ```\n\
-    \n\
-    ### Create a controller:\n\
-    ```bash\n\
-    php artisan make:controller MyController\n\
-    ```\n\
-    \n\
-    Enjoy coding! 🚀' > README_LARAVEL.md
+# Configurer VS Code pour le lancement automatique
+RUN mkdir -p /home/coder/project-laravel/.vscode && \
+    printf '{\n    "version": "2.0.0",\n    "tasks": [\n        {\n            "label": "Auto-Start Server",\n            "type": "shell",\n            "command": "php artisan serve --host=0.0.0.0 --port=${env:PREVIEW_PORT}",\n            "runOptions": { "runOn": "folderOpen" },\n            "presentation": { "reveal": "always", "panel": "new" },\n            "group": { "kind": "build", "isDefault": true }\n        }\n    ]\n}' > /home/coder/project-laravel/.vscode/tasks.json && \
+    printf '{\n    "task.allowAutomaticTasks": "on",\n    "security.workspace.trust.enabled": false\n}' > /home/coder/project-laravel/.vscode/settings.json && \
+    chown -R coder:coder /home/coder/project-laravel/.vscode
+
+# Créer un fichier README
+RUN printf "# Laravel Project\n\n## Getting Started\n\nTo see your app in the Live Preview, the server starts automatically.\nIf it doesn't, run:\n\`\`\`bash\nphp artisan serve --host=0.0.0.0 --port=\$PREVIEW_PORT\n\`\`\`\n" > README_LARAVEL.md
 
 # Installer Docker CLI (pour que le client puisse gérer des conteneurs)
 RUN apt-get update && apt-get install -y docker.io
@@ -71,4 +57,4 @@ USER coder
 
 EXPOSE 8080
 
-CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "--auth", "none"]
+CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "--auth", "none", "/home/coder/project-laravel"]

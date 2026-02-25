@@ -42,10 +42,10 @@ server.listen(5000, () => {
 
 
 app.post("/api/services", (req, res) => {
-    const { name, port, template, socketId } = req.body || {};
+    const { name, port, previewPort, template, socketId } = req.body || {};
 
-    if (!name || !port) {
-        return res.status(400).json({ error: "Name and port are required" });
+    if (!name || !port || !previewPort) {
+        return res.status(400).json({ error: "Name, Port, and Preview Port are required" });
     }
 
     // Generic Docker image map for simple services
@@ -135,45 +135,22 @@ app.post("/api/services", (req, res) => {
                 });
             }
 
-            // Then run the container with Docker socket mounted (DooD capability)
-            const runCommand = `docker run -d -p ${port}:8080 -v /var/run/docker.sock:/var/run/docker.sock --name "${name}" --label managed_by=idp "${imageName}"`;
+            const runCommand = `docker run -d -p ${port}:8080 -p ${previewPort}:${previewPort} -e PREVIEW_PORT=${previewPort} -e PROJECT_TYPE=${template} -v workspace-${name}:/home/coder/project -v /var/run/docker.sock:/var/run/docker.sock --name "${name}-workspace" --label managed_by=idp --label idp_type=workspace --label idp_template=${template} --label idp_preview_port=${previewPort} "${imageName}"`;
 
-            exec(runCommand, (runError, runStdout, runStderr) => {
-                if (runError) {
-                    console.error("Run Error:", runStderr);
-                    let userMessage = "Failed to start container.";
-                    if (runStderr.includes("port is already allocated")) {
-                        userMessage = `Port ${port} is already in use.`;
-                    } else if (runStderr.includes("is already in use by container")) {
-                        userMessage = `Service name "${name}" is already taken.`;
-                    } else {
-                        userMessage = runStderr;
+            // Clean up existing container if any before running
+            exec(`docker rm -f "${name}-workspace"`, () => {
+                exec(runCommand, (runError, runStdout, runStderr) => {
+                    if (runError) {
+                        console.error("Run Error:", runStderr);
+                        let userMessage = runStderr.includes("port is already allocated") ? `Port ${port} or ${previewPort} is already in use.` :
+                            runStderr.includes("is already in use by container") ? `Service name "${name}" is already taken.` : runStderr;
+
+                        if (socket) socket.emit('build-progress', { stage: 'error', progress: 0, message: userMessage });
+                        return res.status(400).json({ error: userMessage });
                     }
 
-                    if (socket) {
-                        socket.emit('build-progress', {
-                            stage: 'error',
-                            progress: 0,
-                            message: userMessage
-                        });
-                    }
-
-                    return res.status(400).json({ error: userMessage });
-                }
-
-                if (socket) {
-                    socket.emit('build-progress', {
-                        stage: 'complete',
-                        progress: 100,
-                        message: 'Dev environment ready! 🚀',
-                        estimatedTimeLeft: 0
-                    });
-                }
-
-                res.json({
-                    message: "Dev environment ready 🚀",
-                    containerId: runStdout.trim(),
-                    url: `http://localhost:${port}`
+                    if (socket) socket.emit('build-progress', { stage: 'complete', progress: 100, message: 'Dev environment ready! 🚀', estimatedTimeLeft: 0 });
+                    res.json({ message: "Dev environment ready 🚀", containerId: runStdout.trim(), url: `http://localhost:${port}` });
                 });
             });
         });
@@ -183,7 +160,7 @@ app.post("/api/services", (req, res) => {
         const image = simpleImageMap[template] || "nginx";
 
         // Simple run command
-        const command = `docker run -d -p ${port}:80 --name ${name} --label managed_by=idp ${image}`;
+        const command = `docker run -d -p ${port}:80 --name ${name} --label managed_by=idp --label idp_type=simple ${image}`;
 
         exec(command, (error, stdout, stderr) => {
             if (error) {
@@ -205,33 +182,183 @@ app.post("/api/services", (req, res) => {
     }
 });
 
+// NEW: Endpoint to deploy from workspace to runtime
+app.post("/api/services/:name/deploy", (req, res) => {
+    const { name } = req.params;
+    const { port, template, socketId } = req.body;
+
+    if (!port || !template) {
+        return res.status(400).json({ error: "Port and template are required" });
+    }
+
+    const socket = socketId ? io.to(socketId) : null;
+    const runtimeName = `${name}-runtime`;
+    const imageName = `${name}-prod-image`;
+    const volumeName = `workspace-${name}`;
+    const templatePath = `./templates/${template}-prod`;
+
+    if (socket) {
+        socket.emit('build-progress', {
+            stage: 'starting',
+            progress: 0,
+            message: 'Starting Production build...',
+            estimatedTimeLeft: 60
+        });
+    }
+
+    // Important: We need to build from the volume content.
+    // Instead of direct file access (which fails on Windows Host), 
+    // we use a docker build from stdin with a tar context generated from the volume.
+    // We also need to inject the prod Dockerfile into that context.
+
+    // 1. Prepare the command to build the image from volume + template Dockerfile
+    // On Windows, piping works in PowerShell/CMD but we must be careful with quotes.
+    // We use a helper container to tar the volume and merge it with the Dockerfile.
+
+    // Simpler approach for local: 
+    // docker run --rm -v ${volumeName}:/src -v ./templates/${template}-prod:/template alpine sh -c "cp /template/Dockerfile /src/ && tar -C /src -cf - ." | docker build -t ${imageName} -
+
+    const buildCommand = `docker run --rm -v ${volumeName}:/src -v "${process.cwd()}/templates/${template}-prod":/template alpine sh -c "cp /template/Dockerfile /src/ && tar -C /src -cf - ." | docker build -t ${imageName} -`;
+
+    console.log("Running build command:", buildCommand);
+
+    if (socket) {
+        socket.emit('build-progress', {
+            stage: 'building',
+            progress: 30,
+            message: 'Building production image from workspace...',
+            estimatedTimeLeft: 40
+        });
+    }
+
+    exec(buildCommand, (buildError, buildStdout, buildStderr) => {
+        if (buildError) {
+            console.error("Build Error:", buildStderr || buildStdout);
+            if (socket) {
+                socket.emit('build-progress', {
+                    stage: 'error',
+                    progress: 0,
+                    message: 'Production build failed',
+                    error: buildStderr || buildStdout
+                });
+            }
+            return res.status(500).json({ error: `Failed to build production image: ${buildStderr || buildStdout}` });
+        }
+
+        if (socket) {
+            socket.emit('build-progress', {
+                stage: 'running',
+                progress: 80,
+                message: 'Starting runtime container...',
+                estimatedTimeLeft: 10
+            });
+        }
+
+        // 2. Stop and remove existing runtime if any
+        const stopCommand = `docker stop ${runtimeName} && docker rm ${runtimeName}`;
+        exec(stopCommand, () => {
+            // 3. Run the runtime container
+            // Note: Node prod uses 3000, Laravel prod uses 8000.
+            const internalPort = template === "node" ? 3000 : 8000;
+            const runCommand = `docker run -d -p ${port}:${internalPort} --name "${runtimeName}" --label managed_by=idp --label idp_type=runtime --label idp_project=${name} "${imageName}"`;
+
+            exec(runCommand, (runError, runStdout, runStderr) => {
+                if (runError) {
+                    console.error("Run Error:", runStderr);
+                    if (socket) {
+                        socket.emit('build-progress', { stage: 'error', progress: 0, message: runStderr });
+                    }
+                    return res.status(400).json({ error: runStderr });
+                }
+
+                if (socket) {
+                    socket.emit('build-progress', {
+                        stage: 'complete',
+                        progress: 100,
+                        message: 'Production runtime ready! 🚀',
+                        estimatedTimeLeft: 0
+                    });
+                }
+
+                res.json({
+                    message: "Production runtime ready 🚀",
+                    containerId: runStdout.trim(),
+                    url: `http://localhost:${port}`
+                });
+            });
+        });
+    });
+});
+
 app.get("/api/services", (req, res) => {
     // Liste uniquement les containers créés par ton IDP
-    // Use a custom delimiter to avoid issues with spaces
-    // Important: On Windows, use single quotes around the format string if possible, or escape double quotes carefully.
-    // Here we use a safe character sequence as delimiter.
-    const command = 'docker ps --filter "label=managed_by=idp" --format "{{.ID}}|||{{.Names}}|||{{.Ports}}"';
+    // We include labels to distinguish between workspace and runtime
+    const command = 'docker ps -a --filter "label=managed_by=idp" --format "{{.ID}}|||{{.Names}}|||{{.Ports}}|||{{.Labels}}"';
 
     exec(command, (error, stdout, stderr) => {
         if (error) {
             console.error("Docker PS Error:", error);
-            console.error("Stderr:", stderr);
-            return res.status(500).json({ error: stderr || "Failed to list containers" });
+            return res.status(500).json({ error: "Failed to list containers" });
         }
 
-        // Transforme stdout en tableau
         const containers = stdout
             .split("\n")
             .filter(line => line.trim())
             .map(line => {
                 const parts = line.split("|||");
-                if (parts.length < 3) return null;
-                const [id, name, port] = parts;
-                return { id, name, port };
+                if (parts.length < 4) return null;
+                const [id, name, portStr, labelsStr] = parts;
+
+                // Parse labels
+                const labels = {};
+                labelsStr.split(",").forEach(l => {
+                    const [k, v] = l.split("=");
+                    if (k && v) labels[k] = v;
+                });
+
+                // Robust port parsing
+                // Example: 0.0.0.0:8081->8080/tcp, 0.0.0.0:3001->3000/tcp
+                let vscodePort = null;
+                const portMappings = portStr.split(",").map(p => p.trim());
+                const vscodeMapping = portMappings.find(pm => pm.endsWith("->8080/tcp"));
+                if (vscodeMapping) {
+                    const match = vscodeMapping.match(/:(\d+)->/);
+                    if (match) vscodePort = match[1];
+                }
+
+                return {
+                    id,
+                    name,
+                    port: vscodePort || portStr,
+                    type: labels.idp_type || 'simple',
+                    template: labels.idp_template || 'unknown',
+                    previewPort: labels.idp_preview_port || null,
+                    project: name.replace('-workspace', '')
+                };
             })
             .filter(c => c !== null);
 
-        res.json({ containers });
+        // Group by project
+        const projectsMap = {};
+        containers.forEach(c => {
+            const pName = c.project;
+            if (!projectsMap[pName]) {
+                projectsMap[pName] = {
+                    name: pName,
+                    template: c.template,
+                    workspace: null,
+                    services: []
+                };
+            }
+
+            if (c.type === 'workspace') {
+                projectsMap[pName].workspace = c;
+            } else {
+                projectsMap[pName].services.push(c);
+            }
+        });
+
+        res.json({ projects: Object.values(projectsMap) });
     });
 });
 

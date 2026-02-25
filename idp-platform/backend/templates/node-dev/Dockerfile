@@ -37,19 +37,14 @@ RUN echo 'node_modules/\n\
     *.log' > .gitignore
 
 # Créer un README
-RUN echo '# Node.js Project\n\
-    \n\
-    ## Getting Started\n\
-    \n\
-    Run the server:\n\
-    ```bash\n\
-    node server.js\n\
-    ```\n\
-    \n\
-    Or with nodemon for auto-reload:\n\
-    ```bash\n\
-    npx nodemon server.js\n\
-    ```' > README.md
+# Configurer VS Code pour le lancement automatique
+RUN mkdir -p /home/coder/project/.vscode && \
+    printf '{\n    "version": "2.0.0",\n    "tasks": [\n        {\n            "label": "Auto-Start Server",\n            "type": "shell",\n            "command": "export PORT=${env:PREVIEW_PORT} && node server.js",\n            "runOptions": { "runOn": "folderOpen" },\n            "presentation": { "reveal": "always", "panel": "new" },\n            "group": { "kind": "build", "isDefault": true }\n        }\n    ]\n}' > /home/coder/project/.vscode/tasks.json && \
+    printf '{\n    "task.allowAutomaticTasks": "on",\n    "security.workspace.trust.enabled": false\n}' > /home/coder/project/.vscode/settings.json && \
+    chown -R coder:coder /home/coder/project/.vscode
+
+# Créer un README
+RUN printf "# Node.js Project\n\n## Getting Started\n\nTo see your app in the Live Preview, the server starts automatically.\nIf it doesn't, run:\n\`\`\`bash\nPORT=\$PREVIEW_PORT node server.js\n\`\`\`\n" > README.md
 
 # Donner permissions
 RUN chown -R coder:coder /home/coder/project
@@ -58,4 +53,4 @@ USER coder
 
 EXPOSE 8080
 
-CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "--auth", "none"]
+CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "--auth", "none", "/home/coder/project"]
